@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+.DS_Store
+.venv/
+venv/
+build/
+dist/
+
+# Local Codex runtime artifacts
+.codex/
+relay_profiles.json
+relay_profiles.lock
+relay_backups/
+relay_probe_runtime/

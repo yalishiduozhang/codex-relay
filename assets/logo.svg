@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 240" width="100%" height="auto" style="max-width: 800px;">
+  <defs>
+    <!-- Modern Gradient -->
+    <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" />
+      <stop offset="100%" stop-color="#4facfe" />
+    </linearGradient>
+    
+    <!-- Neon Glow -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Drop Shadow for aesthetics -->
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.15" />
+    </filter>
+  </defs>
+
+  <style>
+    /* Typography */
+    .title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-weight: 800; font-size: 76px; letter-spacing: -2px; }
+    .subtitle { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-weight: 600; font-size: 18px; fill: #9ca3af; letter-spacing: 5px; text-transform: uppercase;}
+    
+    /* Auto dark/light mode (Defaults to Dark Theme for environments that strip color schemes) */
+    .title-text { fill: #f9fafb; }
+    .switch-box-fill { fill: #111827; }
+    .indicator-off { fill: #374151; }
+    
+    @media (prefers-color-scheme: light) {
+      .title-text { fill: #111827; }
+      .subtitle { fill: #6b7280; }
+      .switch-box-fill { fill: #ffffff; }
+      .indicator-off { fill: #e5e7eb; }
+    }
+    
+    /* Graphic Styles */
+    .primary-path { stroke: url(#brandGrad); stroke-width: 6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .secondary-path { stroke: #9ca3af; stroke-width: 5; fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: 0.3;}
+    .node-active { fill: url(#brandGrad); filter: url(#glow); }
+    .node-inactive { fill: #9ca3af; opacity: 0.5;}
+  </style>
+
+  <!-- Left Icon Group -->
+  <g transform="translate(50, 40)" filter="url(#softShadow)">
+    
+    <!-- Top branch (inactive) -->
+    <path d="M 95,80 C 115,80 115,20 145,20" class="secondary-path" />
+    <circle cx="145" cy="20" r="8" class="node-inactive" />
+    
+    <!-- Bottom branch (inactive) -->
+    <path d="M 95,80 C 115,80 115,140 145,140" class="secondary-path" />
+    <circle cx="145" cy="140" r="8" class="node-inactive" />
+
+    <!-- Middle branch (active) -->
+    <path d="M 95,80 L 145,80" class="primary-path" />
+    <g transform="translate(145, 80)">
+      <circle cx="0" cy="0" r="10" fill="url(#brandGrad)">
+        <animate attributeName="r" values="10; 24" dur="2s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.6; 0" dur="2s" repeatCount="indefinite" />
+      </circle>
+      <circle cx="0" cy="0" r="10" class="node-active" />
+    </g>
+
+    <!-- Source Node -->
+    <path d="M 15,80 L 65,80" class="primary-path" />
+    <g transform="translate(15, 80)">
+      <circle cx="0" cy="0" r="10" fill="url(#brandGrad)">
+        <animate attributeName="r" values="10; 24" dur="2s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.4; 0" dur="2s" repeatCount="indefinite" />
+      </circle>
+      <circle cx="0" cy="0" r="10" class="node-active" />
+    </g>
+    
+    <!-- Central Switch Box -->
+    <rect x="65" y="45" width="30" height="70" rx="15" class="switch-box-fill" stroke="url(#brandGrad)" stroke-width="4" />
+    
+    <!-- Indicator lights -->
+    <circle cx="80" cy="60" r="4" class="indicator-off" />
+    <circle cx="80" cy="80" r="4" fill="#00f2fe" filter="url(#glow)"/>
+    <circle cx="80" cy="100" r="4" class="indicator-off" />
+    
+  </g>
+
+  <!-- Right Text Group -->
+  <g transform="translate(260, 128)">
+    <text x="0" y="0" class="title title-text">codex<tspan fill="url(#brandGrad)">-relay</tspan></text>
+    <text x="5" y="40" class="subtitle">The Ultimate Relay Manager</text>
+  </g>
+</svg>

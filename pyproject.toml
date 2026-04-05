@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-relay"
+version = "0.1.0"
+description = "Manage multiple Codex relay endpoints from the command line and a built-in terminal UI."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Open Source Maintainer" }
+]
+keywords = ["codex", "relay", "cli", "tui", "openai", "endpoint-manager"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Software Development :: User Interfaces",
+  "Topic :: Utilities",
+]
+
+[project.scripts]
+codex-relay = "codex_relay.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yalishiduozhang/codex-relay"
+Repository = "https://github.com/yalishiduozhang/codex-relay"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
