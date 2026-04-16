@@ -4,59 +4,50 @@
 
 # codex-relay
 
-`codex-relay` 是一个面向 Codex 用户的中转站管理工具。它提供零第三方运行时依赖的命令行界面与终端交互界面，帮助你安全、清晰地管理多个 Codex 兼容 relay，而不必反复手改 `~/.codex/config.toml` 和 `~/.codex/auth.json`。
+`codex-relay` 是一个零第三方运行时依赖的 Codex CLI/TUI 配置切换工具。
+它同时支持 relay 型 API key 站点和官方 Codex 订阅，帮助你在不手改 `~/.codex/config.toml` 与 `~/.codex/auth.json` 的情况下安全切换。
 
 English documentation: [README.md](README.md)
 
 ## 项目简介
 
-对于经常切换多个 relay 的用户来说，手动修改 Codex 配置通常既低效又容易出错。典型流程往往是：
+很多 Codex 用户会在两种状态之间来回切换：
 
-1. 打开 `~/.codex/config.toml`
-2. 手动替换 `base_url`
-3. 打开 `~/.codex/auth.json`
-4. 手动替换 `OPENAI_API_KEY`
-5. 试着记住之前还能用的配置
+- relay 站点，依赖 `base_url + OPENAI_API_KEY`
+- 官方 Codex 订阅，依赖 `auth_mode + tokens`
 
-`codex-relay` 将这套机械流程整理为一套可持续维护的工作流：
+这两类配置结构并不一样，手改很容易出错。`codex-relay` 把它整理成一套可重复的工作流：
 
-- 保存多个 relay profile
-- 为每个 relay 添加备注
-- 安全切换当前使用的站点
-- 批量测活并记录结果
-- 使用命令行或 TUI 进行日常管理
-
-## 适用场景
-
-如果你符合下面任意一种情况，这个工具会很有帮助：
-
-- 手里维护多个 relay 或公益站
-- 经常需要在不同中转站之间切换
-- 想保留每个站点的备注和使用记录
-- 希望快速知道“哪个站现在能用、哪个站更稳”
-- 不想因为试错而覆盖掉当前可用的 Codex 配置
+- 保存多个 relay / official profile
+- 安全切换当前使用状态
+- 保留备注和使用记录
+- 用真实 Codex 兼容路径做测活
+- 通过命令行或内置 TUI 管理全部配置
 
 ## 核心特性
 
 - 零第三方运行时依赖
-- 与现有 `~/.codex` 配置直接协作
-- 使用独立 profile 档案保存多个 relay
+- 直接与现有 `~/.codex` 协作
+- 支持两种 profile 类型：`relay` 和 `official`
+- 自动迁移旧版仅 relay 的 profile store
+- 切换时只更新必要字段，不破坏其它 Codex 配置
+- 为 official profile 保留完整认证快照，支持稳定往返切换
+- 支持从另一套 Codex 目录导入快照
+- 支持通过原生 `codex login --device-auth` 创建官方 profile
 - 切换前自动备份当前 live 配置
-- 只更新必要字段，不破坏其余 Codex 配置
-- 支持新增、编辑、重命名、删除、查看当前配置
-- 首次运行自动导入当前 live relay
-- 支持两类测活：
-  - 接近真实 Codex 请求的 HTTP 探针
-  - 真实 `codex exec` 探针
-- 默认同时执行 `http + codex`
-- 内置 TUI，支持筛选、详情、测活和快速切换
-- 使用文件锁保护 profile 存储，避免并发写入覆盖数据
+- 支持 HTTP probe 和真实 `codex exec` probe
+- official profile 会自动跳过 relay 风格 HTTP probe
+- 单个 profile 探测异常不会拖垮整批测试
+- 内置 TUI，支持类型标签页、多选测活和可滚动结果查看
 
 ## 环境要求
 
 - Python 3.11 或更高版本
-- 如果要使用 `--via codex`，需要本机已安装 Codex CLI
-- 若使用 TUI，建议在 Linux、macOS 或支持 `curses` 的环境中运行
+- 如果要使用以下能力，本机需要安装 Codex CLI：
+  - `login-official`
+  - `--via codex`
+  - TUI 内官方登录
+- 如果要使用 TUI，建议在 Linux、macOS 或支持 `curses` 的环境中运行
 
 ## 安装方式
 
@@ -79,292 +70,169 @@ codex-relay --help
 
 ## 快速开始
 
-### 1. 查看当前状态
+### 查看当前状态
 
 ```bash
 codex-relay current
 codex-relay list
 ```
 
-### 2. 添加一个 relay
+### 添加 relay profile
 
 ```bash
 codex-relay add relay-a \
   --url https://relay.example.com \
-  --key <API_KEY> \
+  --key sk-example \
   --note "主力站"
-```
-
-### 3. 切换到该 relay
-
-```bash
-codex-relay use relay-a
-```
-
-### 4. 执行测活
-
-```bash
-codex-relay probe relay-a
-```
-
-### 5. 打开交互界面
-
-```bash
-codex-relay tui
-```
-
-## 详细使用说明
-
-### 列出所有已保存的 profile
-
-```bash
-codex-relay list
-```
-
-输出会显示：
-
-- 已保存的 profile 名称
-- 当前激活项
-- 脱敏后的 key
-- 备注
-- 最近一次 probe 摘要
-- 最近使用时间
-
-### 查看当前 live Codex 配置
-
-```bash
-codex-relay current
-```
-
-这个命令会显示：
-
-- 当前 provider
-- 当前模型
-- 当前 live `base_url`
-- 脱敏后的 API key
-- 是否能匹配到某个已保存的 profile
-
-### 添加 profile
-
-```bash
-codex-relay add relay-a \
-  --url https://relay.example.com \
-  --key <API_KEY> \
-  --note "主力站"
-```
-
-如果希望添加后立刻切换：
-
-```bash
-codex-relay add relay-a \
-  --url https://relay.example.com \
-  --key <API_KEY> \
-  --note "主力站" \
-  --activate
 ```
 
 ### 保存当前 live 配置
 
 ```bash
-codex-relay save-current snapshot-1 --note "从当前可用配置保存"
+codex-relay save-current snapshot-1 --note "当前可用状态"
 ```
 
-这个命令适合用于“我已经手动调好了当前配置，现在想把它收编进 profile 库”。
-
-### 切换到某个已保存的 profile
+### 通过原生登录创建官方 profile
 
 ```bash
+codex-relay login-official official-main
+```
+
+### 从另一套 Codex 目录导入快照
+
+```bash
+codex-relay import ~/.codex-backup/example-codex --name official-backup
+```
+
+### 激活已保存 profile
+
+```bash
+codex-relay use official-main
 codex-relay use relay-a
 ```
 
-也可以按索引切换：
-
-```bash
-codex-relay use --index 2
-```
-
-切换时，`codex-relay` 会：
-
-1. 先备份当前 `config.toml`
-2. 先备份当前 `auth.json`
-3. 只修改当前 provider 的 `base_url`
-4. 只修改 `OPENAI_API_KEY`
-5. 保留其它 Codex 配置不变
-
-### 编辑 profile
-
-重命名：
-
-```bash
-codex-relay edit relay-a --rename relay-main
-```
-
-修改 URL：
-
-```bash
-codex-relay edit relay-a --url https://new-relay.example.com
-```
-
-修改 API key：
-
-```bash
-codex-relay edit relay-a --key <NEW_API_KEY>
-```
-
-修改备注：
-
-```bash
-codex-relay edit relay-a --note "工作日晚间更稳定"
-```
-
-如果被编辑的 profile 正处于激活状态，且你修改了 URL 或 key，工具会同步更新 live Codex 配置。
-
-### 删除 profile
-
-```bash
-codex-relay remove relay-a
-```
-
-这会删除保存的档案项；如果当前 live 配置仍然指向它，工具会给出提醒，但不会擅自改写你当前的 live 配置。
-
-## 测活说明
-
-### 测试单个 relay
+### 执行测活
 
 ```bash
 codex-relay probe relay-a
-```
-
-默认会同时执行两种测活：
-
-- HTTP 探针
-- Codex 探针
-
-### 测试全部 relay
-
-```bash
 codex-relay probe-all
 ```
 
-### 只跑 HTTP 探针
-
-```bash
-codex-relay probe relay-a --via http
-```
-
-### 只跑真实 Codex 探针
-
-```bash
-codex-relay probe relay-a --via codex
-```
-
-### 使用自定义消息测活
-
-```bash
-codex-relay probe relay-a --message "你好，你是谁？"
-```
-
-### 使用期望文本做功能性校验
-
-```bash
-codex-relay probe relay-a \
-  --message "Reply with exactly 42" \
-  --expect 42
-```
-
-这类校验更适合做“功能性测活”，而不是只检查接口是否联通。
-
-### Probe 输出包含哪些信息
-
-对于每个 profile、每种 probe 方法，工具都会尽量展示：
-
-- 是否成功
-- 返回状态码
-- 延迟
-- 模型回复
-- 失败时的错误细节
-
-`both` 模式的意义在于：
-
-- `http` 更轻量，适合快速协议级检查
-- `codex` 更接近真实使用场景
-
-## TUI 使用说明
-
-启动方式：
+### 打开交互界面
 
 ```bash
 codex-relay tui
 ```
 
-TUI 主界面会显示：
+## Profile 类型
 
-- 当前激活 profile
-- 左侧 profile 列表
-- 右侧详情与最近回复
-- 当前 probe 配置
-- 底部状态提示
+### Relay profile
 
-### TUI 常用按键
+relay profile 会保存：
 
-- `h` 或 `?`：打开帮助
-- `Enter` 或 `u`：切换到当前选中项
-- `a`：新增 profile
-- `e`：编辑当前选中 profile
-- `d`：删除当前选中 profile
-- `s`：把当前 live 配置保存成 profile
-- `p`：测试当前选中 profile
-- `P`：测试所有当前可见项
-- `v`：切换 probe 模式 `both / http / codex`
-- `m`：修改 probe message
-- `x`：修改 expected substring
-- `/`：按名称、URL、备注搜索
-- `c`：清空当前过滤条件
-- `i`：打开完整详情弹窗
-- `g`：跳转到当前激活项
-- `PgUp` 或 `PgDn`：在长列表中快速移动
-- `Home` 或 `End`：跳到首个或最后一个可见项
-- `q`：退出
-
-## 实现原理
-
-### Profile 存储
-
-默认保存在：
-
-```text
-~/.codex/relay_profiles.json
-```
-
-每个 profile 包含：
-
-- `name`
 - `base_url`
 - `api_key`
-- `note`
-- `created_at`
-- `updated_at`
-- `last_used_at`
-- `last_probe`
+- 备注
+- 测活记录
 
-### HTTP probe 的实现方式
+### Official profile
 
-HTTP 探针会：
+official profile 会保存：
 
-- 优先尝试 `.../responses`
-- 必要时回退到 `.../v1/responses`
-- 构造接近真实 Codex 的 `responses` 请求体
-- 解析 SSE 流式输出
-- 提取最终模型回复
+- 从 `auth.json` 提取的 `auth_snapshot`
+- 归一化后的 provider/config 快照
+- `auth_mode`
+- 可用时的官方账号摘要
+- 备注
+- 测活记录
 
-### Codex probe 的实现方式
+## 官方登录流程
 
-Codex 探针会：
+要创建新的官方 profile，`codex-relay` 可以在隔离的 `CODEX_HOME` 里调用原生 `codex login --device-auth`。
 
-- 创建隔离的临时 `CODEX_HOME`
-- 注入选中 relay 的 URL 与 key
-- 调用真实 `codex exec`
-- 读取输出文件中的最终回复
+这意味着：
+
+- 登录过程中不会污染当前 live `~/.codex`
+- 浏览器登录链路仍然是原生 Codex
+- 只有校验通过后才会写入 profile store
+
+在 TUI 里，官方登录会临时退出 curses，把终端交给原生 Codex 登录，完成后再干净地回到 TUI。
+
+## 测活逻辑
+
+### 可用模式
+
+- `http`
+- `codex`
+- `both`
+
+### Relay profile 的测活
+
+relay profile 可以使用两种测活方式：
+
+- 基于 Responses 风格接口的 HTTP probe
+- 在隔离运行时中执行真实 `codex exec`
+
+### Official profile 的测活
+
+official profile 会自动只走 `codex` probe。
+它不需要 API key，也不会尝试 relay 风格的 HTTP probe。
+
+### 鲁棒性
+
+- 单个 profile 探测异常不会中断整批测试
+- 结果会按 profile、按 method 分别保存
+- `reply/detail` 会较完整地保留，便于后续查看
+
+## TUI
+
+启动：
+
+```bash
+codex-relay tui
+```
+
+### 主界面能力
+
+- 顶部 `All / Relay / Official` 标签页
+- 搜索和类型过滤
+- 新增 relay profile
+- 通过原生 Codex 登录创建 official profile
+- 导入 profile 快照
+- 保存当前 live 配置
+- 切换、编辑、删除 profile
+- 多选待测 profile
+- 可滚动的详情和测活结果弹窗
+
+### 常用快捷键
+
+- `Enter` 或 `u`：激活当前 profile
+- `a`：新增 relay profile
+- `o`：通过原生 Codex 登录新增 official profile
+- `I`：从目录导入 profile 快照
+- `e`：编辑当前 profile
+- `d`：删除当前 profile
+- `s`：保存当前 live 配置
+- `Space`：标记或取消标记当前 profile
+- `A`：标记或反标记当前可见列表
+- `C`：清空所有测试标记
+- `p`：优先测试已标记 profile；如果没有标记，则测试当前项
+- `P`：测试全部可见 profile
+- `v`：切换 probe 模式
+- `t`：循环切换类型标签页
+- `Tab` 或 `Shift-Tab`：切换类型标签页
+- `/`：搜索
+- `c`：清空搜索过滤
+- `i`：打开完整详情
+- `g`：跳到当前激活项
+- `h` 或 `?`：帮助
+- `q`：退出
+
+结果弹窗支持：
+
+- `Up` 或 `Down`
+- `PgUp` 或 `PgDn`
+- `Home` 或 `End`
 
 ## 开发与测试
 
@@ -374,30 +242,10 @@ Codex 探针会：
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-直接从源码运行：
+直接从源码启动：
 
 ```bash
 PYTHONPATH=src python -m codex_relay --help
-```
-
-## 项目结构
-
-```text
-codex-relay/
-├── .github/workflows/ci.yml
-├── LICENSE
-├── README.md
-├── README.zh-CN.md
-├── pyproject.toml
-├── src/codex_relay/
-│   ├── __init__.py
-│   ├── __main__.py
-│   └── cli.py
-└── tests/
-    ├── helpers.py
-    ├── test_cli_workflows.py
-    ├── test_probe_http.py
-    └── test_tui_and_hygiene.py
 ```
 
 ## License

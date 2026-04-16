@@ -9,7 +9,7 @@ from unittest import mock
 
 from codex_relay import cli
 
-from tests.helpers import create_codex_home
+from tests.helpers import create_codex_home, create_official_codex_home
 
 
 class FakeHTTPResponse:
@@ -125,6 +125,59 @@ class HttpProbeTests(unittest.TestCase):
             last_probe = saved_store["profiles"][0]["last_probe"]
             self.assertEqual(last_probe["methods"]["http"]["reply"], self.reply_text)
             self.assertTrue(last_probe["methods"]["http"]["ok"])
+
+    def test_execute_probe_keeps_running_when_one_method_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            codex_home = create_codex_home(Path(tmp_dir) / ".codex")
+            paths = cli.build_paths(codex_home)
+            store = {
+                "version": cli.STORE_VERSION,
+                "profiles": [
+                    cli.make_profile("relay-a", "https://relay.example.com", "TEST_PROBE_KEY"),
+                    cli.make_profile("relay-b", "https://relay-b.example.com", "TEST_PROBE_KEY_B"),
+                ],
+            }
+            cli.write_store(paths, store)
+
+            def fake_probe_one(source_paths, profile, model, message, method, timeout, expect):  # type: ignore[no-untyped-def]
+                if profile["name"] == "relay-a" and method == "http":
+                    raise RuntimeError("boom")
+                return {
+                    "ok": True,
+                    "method": method,
+                    "status_code": 0,
+                    "detail": "ok",
+                    "reply": "ok",
+                    "latency_ms": 1,
+                }
+
+            with mock.patch("codex_relay.cli.probe_one", side_effect=fake_probe_one):
+                results, overall_ok = cli.execute_probe(
+                    paths,
+                    targets=list(enumerate(store["profiles"])),
+                    via="http",
+                    message="Ping",
+                    expect=None,
+                    model="gpt-5.4",
+                    timeout=5.0,
+                    workers=1,
+                )
+
+            self.assertFalse(overall_ok)
+            self.assertEqual(len(results), 2)
+            relay_a = next(item for item in results if item[0]["name"] == "relay-a")
+            self.assertFalse(relay_a[1]["http"]["ok"])
+            self.assertIn("RuntimeError", relay_a[1]["http"]["detail"])
+
+    def test_effective_probe_methods_skips_http_for_official_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            codex_home = create_official_codex_home(Path(tmp_dir) / ".codex")
+            paths = cli.build_paths(codex_home)
+            live_state = cli.read_live_state(paths)
+            profile = cli.build_profile_from_state("official-main", live_state, "official")
+
+            methods = cli.effective_probe_methods(profile, ["http", "codex"])
+            self.assertEqual(methods, ["codex"])
 
 
 if __name__ == "__main__":

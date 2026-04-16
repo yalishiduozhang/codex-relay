@@ -32,3 +32,35 @@ def create_codex_home(
         encoding="utf-8",
     )
     return codex_home
+
+
+def create_official_codex_home(
+    codex_home: Path,
+    *,
+    model: str = "gpt-5.4",
+    auth_mode: str = "chatgpt",
+    account_id: str = "acct-test-0001",
+) -> Path:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    config_text = textwrap.dedent(
+        f"""\
+        model = "{model}"
+        review_model = "{model}"
+        """
+    )
+    (codex_home / "config.toml").write_text(config_text, encoding="utf-8")
+    auth_payload = {
+        "auth_mode": auth_mode,
+        "tokens": {
+            "account_id": account_id,
+            "access_token": "ACCESS_TOKEN_TEST",
+            "refresh_token": "REFRESH_TOKEN_TEST",
+            "id_token": "ID_TOKEN_TEST",
+        },
+        "last_refresh": "2026-04-13T13:17:37.721673097Z",
+    }
+    (codex_home / "auth.json").write_text(
+        json.dumps(auth_payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return codex_home

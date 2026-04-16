@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""codex-relay command-line and TUI application.
-
-This module intentionally uses only the Python standard library so it can run
-on a clean machine without extra dependencies.
-"""
 
 from __future__ import annotations
 
@@ -34,7 +29,6 @@ from typing import Any
 import tomllib
 
 
-VERSION = "0.1.0"
 DEFAULT_MESSAGE = "hi"
 DEFAULT_HTTP_TIMEOUT = 20.0
 DEFAULT_CODEX_TIMEOUT = 90.0
@@ -42,6 +36,10 @@ DEFAULT_HTTP_WORKERS = 8
 DEFAULT_CODEX_WORKERS = 3
 DEFAULT_HTTP_RETRIES = 3
 DEFAULT_REPLY_DISPLAY_LIMIT = 300
+PROBE_TEXT_STORAGE_LIMIT = 4000
+RIGHT_PANEL_TEXT_LIMIT = 220
+STORE_VERSION = 2
+VERSION = "0.2.0"
 CODEX_PROBE_INSTRUCTIONS = (
     "You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI "
     "on a user's computer."
@@ -183,30 +181,118 @@ def current_provider(parsed_config: dict[str, Any]) -> str:
     return "OpenAI"
 
 
-def read_live_state(paths: Paths) -> dict[str, Any]:
-    _, parsed = read_config(paths)
-    auth = read_auth(paths)
-    provider_name = current_provider(parsed)
-    providers = parsed.get("model_providers", {})
-    provider_cfg = {}
+def config_snapshot_from_parsed(parsed_config: dict[str, Any]) -> dict[str, Any]:
+    provider_name = current_provider(parsed_config)
+    providers = parsed_config.get("model_providers", {})
+    provider_cfg = None
+    if isinstance(providers, dict):
+        maybe_provider = providers.get(provider_name)
+        if isinstance(maybe_provider, dict):
+            provider_cfg = copy.deepcopy(maybe_provider)
+    model_provider = parsed_config.get("model_provider")
+    return {
+        "model_provider": model_provider if isinstance(model_provider, str) and model_provider.strip() else None,
+        "provider_name": provider_name,
+        "provider_section": provider_cfg,
+    }
+
+
+def official_identifier_from_auth(auth_payload: dict[str, Any]) -> str | None:
+    tokens = auth_payload.get("tokens")
+    if isinstance(tokens, dict):
+        account_id = tokens.get("account_id")
+        if isinstance(account_id, str) and account_id.strip():
+            return f"account:{account_id.strip()}"
+        refresh_token = tokens.get("refresh_token")
+        if isinstance(refresh_token, str) and refresh_token.strip():
+            return f"refresh:{refresh_token.strip()}"
+        access_token = tokens.get("access_token")
+        if isinstance(access_token, str) and access_token.strip():
+            return f"access:{access_token.strip()}"
+        id_token = tokens.get("id_token")
+        if isinstance(id_token, str) and id_token.strip():
+            return f"id:{id_token.strip()}"
+    auth_mode = auth_payload.get("auth_mode")
+    if isinstance(auth_mode, str) and auth_mode.strip():
+        return f"mode:{auth_mode.strip()}"
+    return None
+
+
+def normalize_config_snapshot(snapshot: Any) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {
+            "model_provider": None,
+            "provider_name": "OpenAI",
+            "provider_section": None,
+        }
+    model_provider = snapshot.get("model_provider")
+    provider_name = snapshot.get("provider_name")
+    provider_section = snapshot.get("provider_section")
+    normalized_section: dict[str, Any] | None = None
+    if isinstance(provider_section, dict):
+        normalized_section = {}
+        for key, value in provider_section.items():
+            if not isinstance(key, str):
+                continue
+            if isinstance(value, (str, bool, int, float)):
+                normalized_section[key] = value
+    return {
+        "model_provider": model_provider if isinstance(model_provider, str) and model_provider.strip() else None,
+        "provider_name": provider_name if isinstance(provider_name, str) and provider_name.strip() else "OpenAI",
+        "provider_section": normalized_section,
+    }
+
+
+def build_live_state(
+    config_text: str, parsed_config: dict[str, Any], auth_payload: dict[str, Any]
+) -> dict[str, Any]:
+    provider_name = current_provider(parsed_config)
+    providers = parsed_config.get("model_providers", {})
+    provider_cfg: dict[str, Any] = {}
     if isinstance(providers, dict):
         maybe_provider = providers.get(provider_name)
         if isinstance(maybe_provider, dict):
             provider_cfg = maybe_provider
     base_url = provider_cfg.get("base_url")
-    wire_api = provider_cfg.get("wire_api")
+    normalized_base_url = (
+        normalize_url(base_url) if isinstance(base_url, str) and base_url.strip() else None
+    )
+    api_key = auth_payload.get("OPENAI_API_KEY")
+    normalized_api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else None
+    auth_mode = auth_payload.get("auth_mode")
+    normalized_auth_mode = auth_mode.strip() if isinstance(auth_mode, str) and auth_mode.strip() else None
+    official_id = official_identifier_from_auth(auth_payload)
+    state_type = "unknown"
+    if normalized_base_url and normalized_api_key:
+        state_type = "relay"
+    elif official_id or normalized_auth_mode:
+        state_type = "official"
     return {
+        "type": state_type,
         "provider_name": provider_name,
-        "base_url": normalize_url(base_url) if isinstance(base_url, str) and base_url.strip() else None,
-        "api_key": auth.get("OPENAI_API_KEY") if isinstance(auth.get("OPENAI_API_KEY"), str) else None,
-        "model": parsed.get("model") if isinstance(parsed.get("model"), str) else None,
-        "wire_api": wire_api if isinstance(wire_api, str) else None,
+        "base_url": normalized_base_url,
+        "api_key": normalized_api_key,
+        "model": parsed_config.get("model") if isinstance(parsed_config.get("model"), str) else None,
+        "wire_api": provider_cfg.get("wire_api") if isinstance(provider_cfg.get("wire_api"), str) else None,
+        "auth_mode": normalized_auth_mode,
+        "official_id": official_id,
+        "auth_snapshot": copy.deepcopy(auth_payload),
+        "config_snapshot": config_snapshot_from_parsed(parsed_config),
+        "config_text": config_text,
+        "parsed_config": parsed_config,
     }
+
+
+def read_live_state(paths: Paths) -> dict[str, Any]:
+    config_text, parsed = read_config(paths)
+    auth = read_auth(paths)
+    return build_live_state(config_text, parsed, auth)
 
 
 def make_profile(name: str, url: str, api_key: str, note: str = "") -> dict[str, Any]:
     timestamp = now_iso()
     return {
+        "type": "relay",
         "name": name,
         "base_url": normalize_url(url),
         "api_key": api_key.strip(),
@@ -218,32 +304,140 @@ def make_profile(name: str, url: str, api_key: str, note: str = "") -> dict[str,
     }
 
 
-def profile_signature(profile: dict[str, Any]) -> tuple[str | None, str | None]:
-    url = profile.get("base_url")
-    key = profile.get("api_key")
-    return (
-        normalize_url(url) if isinstance(url, str) and url.strip() else None,
-        key if isinstance(key, str) and key else None,
-    )
+def make_official_profile(
+    name: str,
+    auth_payload: dict[str, Any],
+    config_snapshot: dict[str, Any],
+    note: str = "",
+    source_path: str | None = None,
+) -> dict[str, Any]:
+    official_id = official_identifier_from_auth(auth_payload)
+    if not official_id:
+        raise RelayError("Official profile import requires auth_mode or tokens in auth.json.")
+    timestamp = now_iso()
+    profile = {
+        "type": "official",
+        "name": name,
+        "note": note.strip(),
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "last_used_at": None,
+        "last_probe": None,
+        "auth_snapshot": copy.deepcopy(auth_payload),
+        "auth_mode": auth_payload.get("auth_mode") if isinstance(auth_payload.get("auth_mode"), str) else None,
+        "official_id": official_id,
+        "config_snapshot": normalize_config_snapshot(config_snapshot),
+    }
+    if source_path:
+        profile["source_path"] = str(Path(source_path).expanduser())
+    return profile
 
 
-def live_signature(live_state: dict[str, Any]) -> tuple[str | None, str | None]:
-    url = live_state.get("base_url")
-    key = live_state.get("api_key")
-    return (
-        normalize_url(url) if isinstance(url, str) and url.strip() else None,
-        key if isinstance(key, str) and key else None,
-    )
+def build_profile_from_state(
+    name: str,
+    live_state: dict[str, Any],
+    note: str = "",
+    source_path: str | None = None,
+) -> dict[str, Any]:
+    state_type = live_state.get("type")
+    if state_type == "relay":
+        base_url = live_state.get("base_url")
+        api_key = live_state.get("api_key")
+        if not isinstance(base_url, str) or not isinstance(api_key, str):
+            raise RelayError("Relay profile requires both base_url and OPENAI_API_KEY.")
+        profile = make_profile(name, base_url, api_key, note)
+    elif state_type == "official":
+        auth_payload = live_state.get("auth_snapshot")
+        if not isinstance(auth_payload, dict):
+            raise RelayError("Official profile requires a valid auth.json snapshot.")
+        profile = make_official_profile(
+            name,
+            auth_payload,
+            normalize_config_snapshot(live_state.get("config_snapshot")),
+            note,
+            source_path=source_path,
+        )
+    else:
+        raise RelayError("Current Codex config is neither a relay profile nor an official subscription.")
+    if source_path:
+        profile["source_path"] = str(Path(source_path).expanduser())
+    return profile
+
+
+def profile_type(profile: dict[str, Any]) -> str:
+    raw = profile.get("type")
+    if raw in {"relay", "official"}:
+        return str(raw)
+    if isinstance(profile.get("auth_snapshot"), dict):
+        return "official"
+    return "relay"
+
+
+def profile_base_url(profile: dict[str, Any]) -> str | None:
+    value = profile.get("base_url")
+    if isinstance(value, str) and value.strip():
+        return normalize_url(value)
+    return None
+
+
+def profile_api_key(profile: dict[str, Any]) -> str | None:
+    value = profile.get("api_key")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def profile_auth_mode(profile: dict[str, Any]) -> str | None:
+    value = profile.get("auth_mode")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    auth_snapshot = profile.get("auth_snapshot")
+    if isinstance(auth_snapshot, dict):
+        mode = auth_snapshot.get("auth_mode")
+        if isinstance(mode, str) and mode.strip():
+            return mode.strip()
+    return None
+
+
+def profile_official_id(profile: dict[str, Any]) -> str | None:
+    value = profile.get("official_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    auth_snapshot = profile.get("auth_snapshot")
+    if isinstance(auth_snapshot, dict):
+        return official_identifier_from_auth(auth_snapshot)
+    return None
+
+
+def profile_supports_http(profile: dict[str, Any]) -> bool:
+    return profile_type(profile) == "relay" and bool(profile_base_url(profile) and profile_api_key(profile))
+
+
+def profile_signature(profile: dict[str, Any]) -> tuple[Any, ...]:
+    kind = profile_type(profile)
+    if kind == "official":
+        return ("official", profile_official_id(profile))
+    return ("relay", profile_base_url(profile) or "", profile_api_key(profile) or "")
+
+
+def live_signature(live_state: dict[str, Any]) -> tuple[Any, ...]:
+    if live_state.get("type") == "official":
+        return ("official", live_state.get("official_id"))
+    return ("relay", live_state.get("base_url") or "", live_state.get("api_key") or "")
 
 
 def profile_exists(store: dict[str, Any], name: str) -> bool:
     return any(profile.get("name") == name for profile in store["profiles"])
 
 
+def slugify(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").lower()
+
+
 def suggest_name(store: dict[str, Any], url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc or "profile"
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", host).strip("-").lower() or "profile"
+    slug = slugify(host) or "profile"
     candidate = slug
     counter = 2
     while profile_exists(store, candidate):
@@ -252,32 +446,135 @@ def suggest_name(store: dict[str, Any], url: str) -> str:
     return candidate
 
 
+def suggest_official_name(
+    store: dict[str, Any], official_id: str | None, source_path: str | Path | None = None
+) -> str:
+    base = None
+    if source_path is not None:
+        source_name = Path(source_path).expanduser().name
+        cleaned = slugify(source_name)
+        if cleaned and cleaned != "codex":
+            base = cleaned
+    if not base and official_id:
+        cleaned_id = slugify(official_id)
+        if cleaned_id:
+            suffix = cleaned_id[-8:] if len(cleaned_id) > 8 else cleaned_id
+            base = f"official-{suffix}"
+    if not base:
+        base = "official"
+    candidate = base
+    counter = 2
+    while profile_exists(store, candidate):
+        candidate = f"{base}-{counter}"
+        counter += 1
+    return candidate
+
+
+def suggest_name_from_state(
+    store: dict[str, Any], live_state: dict[str, Any], source_path: str | Path | None = None
+) -> str:
+    if live_state.get("type") == "relay" and isinstance(live_state.get("base_url"), str):
+        return suggest_name(store, live_state["base_url"])
+    return suggest_official_name(store, live_state.get("official_id"), source_path)
+
+
+def normalize_profile_entry(profile: Any) -> tuple[dict[str, Any], bool]:
+    if not isinstance(profile, dict):
+        raise RelayError("Profile store contains a non-object entry.")
+    normalized = copy.deepcopy(profile)
+    changed = False
+    kind = profile_type(normalized)
+    if normalized.get("type") != kind:
+        normalized["type"] = kind
+        changed = True
+    note = normalized.get("note")
+    if not isinstance(note, str):
+        normalized["note"] = "" if note is None else str(note)
+        changed = True
+
+    if kind == "relay":
+        base_url = normalized.get("base_url")
+        api_key = normalized.get("api_key")
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise RelayError(f"Relay profile '{normalized.get('name')}' is missing base_url.")
+        normalized_base_url = normalize_url(base_url)
+        if normalized_base_url != base_url:
+            normalized["base_url"] = normalized_base_url
+            changed = True
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise RelayError(f"Relay profile '{normalized.get('name')}' is missing api_key.")
+        stripped_key = api_key.strip()
+        if stripped_key != api_key:
+            normalized["api_key"] = stripped_key
+            changed = True
+    else:
+        auth_snapshot = normalized.get("auth_snapshot")
+        if not isinstance(auth_snapshot, dict):
+            raise RelayError(f"Official profile '{normalized.get('name')}' is missing auth_snapshot.")
+        official_id = official_identifier_from_auth(auth_snapshot)
+        if not official_id:
+            raise RelayError(
+                f"Official profile '{normalized.get('name')}' is missing account_id/refresh_token."
+            )
+        if normalized.get("official_id") != official_id:
+            normalized["official_id"] = official_id
+            changed = True
+        auth_mode = auth_snapshot.get("auth_mode")
+        normalized_auth_mode = auth_mode.strip() if isinstance(auth_mode, str) and auth_mode.strip() else None
+        if normalized.get("auth_mode") != normalized_auth_mode:
+            normalized["auth_mode"] = normalized_auth_mode
+            changed = True
+        config_snapshot = normalize_config_snapshot(normalized.get("config_snapshot"))
+        if normalized.get("config_snapshot") != config_snapshot:
+            normalized["config_snapshot"] = config_snapshot
+            changed = True
+
+    return normalized, changed
+
+
+def normalize_store(store: Any) -> tuple[dict[str, Any], bool]:
+    if not isinstance(store, dict):
+        raise RelayError("Unsupported profile store format.")
+    version = store.get("version")
+    if version not in {1, STORE_VERSION} or not isinstance(store.get("profiles"), list):
+        raise RelayError("Unsupported profile store format.")
+    changed = version != STORE_VERSION
+    normalized_profiles: list[dict[str, Any]] = []
+    for profile in store["profiles"]:
+        normalized_profile, profile_changed = normalize_profile_entry(profile)
+        normalized_profiles.append(normalized_profile)
+        changed = changed or profile_changed
+    normalized_store = {"version": STORE_VERSION, "profiles": normalized_profiles}
+    return normalized_store, changed
+
+
 def load_store_unlocked(paths: Paths) -> tuple[dict[str, Any], str | None]:
     if paths.profiles_path.exists():
         try:
             store = json.loads(paths.profiles_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise RelayError(f"Failed to parse {paths.profiles_path}: {exc}") from exc
-        if store.get("version") != 1 or not isinstance(store.get("profiles"), list):
-            raise RelayError(f"Unsupported profile store format: {paths.profiles_path}")
+        store, changed = normalize_store(store)
+        if changed:
+            write_store(paths, store)
         return store, None
 
     ensure_dir(paths.codex_home)
-    store = {"version": 1, "profiles": []}
+    store = {"version": STORE_VERSION, "profiles": []}
     created_message = None
     live_state = read_live_state(paths)
-    if live_state["base_url"] and live_state["api_key"]:
-        imported_name = suggest_name(store, live_state["base_url"])
-        imported_profile = make_profile(
+    if live_state.get("type") in {"relay", "official"}:
+        imported_name = suggest_name_from_state(store, live_state, paths.codex_home)
+        imported_profile = build_profile_from_state(
             imported_name,
-            live_state["base_url"],
-            live_state["api_key"],
+            live_state,
             "Auto-imported from the current Codex config on first run.",
+            source_path=str(paths.codex_home),
         )
         imported_profile["last_used_at"] = now_iso()
         store["profiles"].append(imported_profile)
         created_message = (
-            f"Imported the current live Codex endpoint as profile '{imported_name}'."
+            f"Imported the current live Codex profile as '{imported_name}'."
         )
     write_store(paths, store)
     return store, created_message
@@ -298,6 +595,149 @@ def mask_key(key: str | None) -> str:
     if len(key) <= 8:
         return key[:2] + "***"
     return f"{key[:6]}...{key[-4:]}"
+
+
+def toml_value_literal(value: Any) -> str:
+    if isinstance(value, str):
+        return toml_quote(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    raise RelayError(f"Unsupported TOML value type: {type(value).__name__}")
+
+
+def update_toml_root_key(text: str, key: str, new_value: str) -> str:
+    key_pattern = re.compile(rf"(?m)^({re.escape(key)}\s*=\s*)([^#\n]*?)(\s*(?:#.*)?)$")
+    if key_pattern.search(text):
+        return key_pattern.sub(rf"\1{new_value}\3", text, count=1)
+    first_section = re.search(r"(?m)^\[", text)
+    insertion = f"{key} = {new_value}\n"
+    if first_section:
+        prefix = text[: first_section.start()]
+        suffix = text[first_section.start() :]
+        if prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        if prefix and not prefix.endswith("\n\n"):
+            prefix += "\n"
+        return prefix + insertion + suffix
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text + insertion
+
+
+def remove_toml_root_key(text: str, key: str) -> str:
+    return re.sub(rf"(?m)^{re.escape(key)}\s*=\s*[^#\n]*\s*(?:#.*)?\n?", "", text)
+
+
+def remove_toml_section(text: str, section_name: str) -> str:
+    section_header = f"[{section_name}]"
+    section_start = text.find(section_header)
+    if section_start == -1:
+        return text
+    _, body_end = extract_body_start(text, section_start)
+    updated = text[:section_start] + text[body_end:]
+    return re.sub(r"\n{3,}", "\n\n", updated)
+
+
+def replace_toml_section(text: str, section_name: str, values: dict[str, Any] | None) -> str:
+    updated = remove_toml_section(text, section_name)
+    if values is None:
+        return updated
+    if updated and not updated.endswith("\n"):
+        updated += "\n"
+    if updated and not updated.endswith("\n\n"):
+        updated += "\n"
+    lines = [f"[{section_name}]"]
+    for key, value in values.items():
+        if not isinstance(key, str):
+            continue
+        if value is None:
+            continue
+        lines.append(f"{key} = {toml_value_literal(value)}")
+    return updated + "\n".join(lines) + "\n"
+
+
+def apply_config_snapshot(
+    config_text: str,
+    current_provider_name: str,
+    snapshot: dict[str, Any],
+) -> str:
+    normalized_snapshot = normalize_config_snapshot(snapshot)
+    target_provider_name = normalized_snapshot.get("provider_name") or "OpenAI"
+    model_provider = normalized_snapshot.get("model_provider")
+    provider_section = normalized_snapshot.get("provider_section")
+    if isinstance(model_provider, str) and model_provider:
+        config_text = update_toml_root_key(config_text, "model_provider", toml_quote(model_provider))
+    else:
+        config_text = remove_toml_root_key(config_text, "model_provider")
+    for provider_name in dict.fromkeys([current_provider_name, target_provider_name, "OpenAI"]):
+        if provider_name:
+            config_text = remove_toml_section(config_text, f"model_providers.{provider_name}")
+    if provider_section is not None:
+        config_text = replace_toml_section(
+            config_text,
+            f"model_providers.{target_provider_name}",
+            provider_section,
+        )
+    return config_text
+
+
+def relay_provider_config(profile: dict[str, Any]) -> dict[str, Any]:
+    base_url = profile_base_url(profile)
+    if not base_url:
+        raise RelayError(f"Relay profile '{profile.get('name')}' is missing base_url.")
+    return {
+        "name": "OpenAI",
+        "base_url": base_url,
+        "wire_api": "responses",
+        "requires_openai_auth": True,
+    }
+
+
+def profile_display_type(profile: dict[str, Any]) -> str:
+    return profile_type(profile)
+
+
+def profile_account_summary(profile: dict[str, Any]) -> str | None:
+    if profile_type(profile) != "official":
+        return None
+    auth_snapshot = profile.get("auth_snapshot")
+    if not isinstance(auth_snapshot, dict):
+        return None
+    tokens = auth_snapshot.get("tokens")
+    if isinstance(tokens, dict):
+        account_id = tokens.get("account_id")
+        if isinstance(account_id, str) and account_id.strip():
+            trimmed = account_id.strip()
+            return f"account:{trimmed[-8:]}" if len(trimmed) > 8 else f"account:{trimmed}"
+    official_id = profile_official_id(profile)
+    if isinstance(official_id, str) and official_id.strip():
+        return official_id
+    return None
+
+
+def profile_display_target(profile: dict[str, Any]) -> str:
+    kind = profile_type(profile)
+    if kind == "relay":
+        return profile_base_url(profile) or "(missing)"
+    source_path = profile.get("source_path")
+    if isinstance(source_path, str) and source_path.strip():
+        return source_path
+    mode = profile_auth_mode(profile)
+    if mode:
+        return f"auth_mode={mode}"
+    return "(official auth snapshot)"
+
+
+def profile_display_secret(profile: dict[str, Any]) -> str:
+    if profile_type(profile) == "relay":
+        return mask_key(profile_api_key(profile))
+    mode = profile_auth_mode(profile) or "(token-based auth)"
+    summary = profile_account_summary(profile)
+    if summary:
+        return f"{mode} | {summary}"
+    return mode
 
 
 def format_probe(last_probe: dict[str, Any] | None) -> str:
@@ -425,17 +865,36 @@ def apply_profile(paths: Paths, profile: dict[str, Any]) -> None:
     backup_live_files(paths)
     config_text, parsed = read_config(paths)
     provider_name = current_provider(parsed)
-    updated_config = update_toml_key_in_section(
+    kind = profile_type(profile)
+
+    if kind == "relay":
+        updated_config = apply_config_snapshot(
+            config_text,
+            provider_name,
+            {
+                "model_provider": "OpenAI",
+                "provider_name": "OpenAI",
+                "provider_section": relay_provider_config(profile),
+            },
+        )
+        atomic_write_text(paths.config_path, updated_config)
+        auth_payload = read_auth(paths)
+        for key in ("auth_mode", "tokens", "last_refresh"):
+            auth_payload.pop(key, None)
+        auth_payload["OPENAI_API_KEY"] = profile_api_key(profile)
+        atomic_write_json(paths.auth_path, auth_payload, mode=0o600)
+        return
+
+    auth_snapshot = profile.get("auth_snapshot")
+    if not isinstance(auth_snapshot, dict):
+        raise RelayError(f"Official profile '{profile.get('name')}' is missing auth_snapshot.")
+    updated_config = apply_config_snapshot(
         config_text,
-        f"model_providers.{provider_name}",
-        "base_url",
-        toml_quote(profile["base_url"]),
+        provider_name,
+        normalize_config_snapshot(profile.get("config_snapshot")),
     )
     atomic_write_text(paths.config_path, updated_config)
-
-    auth_payload = read_auth(paths)
-    auth_payload["OPENAI_API_KEY"] = profile["api_key"]
-    atomic_write_json(paths.auth_path, auth_payload, mode=0o600)
+    atomic_write_json(paths.auth_path, copy.deepcopy(auth_snapshot), mode=0o600)
 
 
 def print_profile_table(store: dict[str, Any], live_state: dict[str, Any] | None = None) -> None:
@@ -446,8 +905,9 @@ def print_profile_table(store: dict[str, Any], live_state: dict[str, Any] | None
     for offset, profile in enumerate(store["profiles"], start=1):
         marker = "*" if profile_signature(profile) == active_signature else " "
         print(f"{marker} [{offset}] {profile['name']}")
-        print(f"    URL   : {profile['base_url']}")
-        print(f"    Key   : {mask_key(profile.get('api_key'))}")
+        print(f"    Type  : {profile_display_type(profile)}")
+        print(f"    Target: {profile_display_target(profile)}")
+        print(f"    Auth  : {profile_display_secret(profile)}")
         note = profile.get("note") or "-"
         print(f"    Note  : {note}")
         print(f"    Probe : {format_probe(profile.get('last_probe'))}")
@@ -457,10 +917,30 @@ def print_profile_table(store: dict[str, Any], live_state: dict[str, Any] | None
 
 def print_current(paths: Paths, store: dict[str, Any]) -> int:
     live_state = read_live_state(paths)
+    current_type = live_state.get("type") or "unknown"
     print(f"Provider : {live_state.get('provider_name') or '(unknown)'}")
+    print(f"Type     : {current_type}")
     print(f"Model    : {live_state.get('model') or '(unknown)'}")
-    print(f"Base URL : {live_state.get('base_url') or '(missing)'}")
-    print(f"API key  : {mask_key(live_state.get('api_key'))}")
+    if current_type == "relay":
+        print(f"Base URL : {live_state.get('base_url') or '(missing)'}")
+        print(f"API key  : {mask_key(live_state.get('api_key'))}")
+    elif current_type == "official":
+        print(f"Auth mode: {live_state.get('auth_mode') or '(unknown)'}")
+        live_summary = None
+        auth_snapshot = live_state.get("auth_snapshot")
+        if isinstance(auth_snapshot, dict):
+            tokens = auth_snapshot.get("tokens")
+            if isinstance(tokens, dict):
+                account_id = tokens.get("account_id")
+                if isinstance(account_id, str) and account_id.strip():
+                    trimmed = account_id.strip()
+                    live_summary = f"account:{trimmed[-8:]}" if len(trimmed) > 8 else f"account:{trimmed}"
+        if live_summary:
+            print(f"Account  : {live_summary}")
+        print("Base URL : (managed by official subscription auth)")
+    else:
+        print(f"Base URL : {live_state.get('base_url') or '(missing)'}")
+        print(f"API key  : {mask_key(live_state.get('api_key'))}")
     active_signature = live_signature(live_state)
     for offset, profile in enumerate(store["profiles"], start=1):
         if profile_signature(profile) == active_signature:
@@ -472,6 +952,92 @@ def print_current(paths: Paths, store: dict[str, Any]) -> int:
     print("Profile  : unmanaged current config")
     print("Hint     : use `codex-relay save-current <name>` to save it.")
     return 1
+
+
+def import_profile_from_directory(
+    store: dict[str, Any],
+    name: str,
+    source_dir: str | Path,
+    note: str = "",
+) -> dict[str, Any]:
+    source_root = Path(source_dir).expanduser().resolve()
+    source_paths = build_paths(source_root)
+    if not source_paths.config_path.exists():
+        raise RelayError(f"Missing config.toml in {source_root}")
+    if not source_paths.auth_path.exists():
+        raise RelayError(f"Missing auth.json in {source_root}")
+    live_state = read_live_state(source_paths)
+    if live_state.get("type") not in {"relay", "official"}:
+        raise RelayError(
+            f"Could not detect a relay or official subscription profile in {source_root}"
+        )
+    if profile_exists(store, name):
+        raise RelayError(f"Profile already exists: {name}")
+    return build_profile_from_state(name, live_state, note, source_path=str(source_root))
+
+
+def official_login_snapshot(paths: Paths) -> dict[str, Any]:
+    _, parsed = read_config(paths)
+    return {
+        "model_provider": None,
+        "provider_name": current_provider(parsed),
+        "provider_section": None,
+    }
+
+
+def prepare_official_login_home(source_paths: Paths, target_codex_home: Path) -> None:
+    ensure_dir(target_codex_home)
+    config_text, parsed = read_config(source_paths)
+    sanitized_config = apply_config_snapshot(
+        config_text,
+        current_provider(parsed),
+        official_login_snapshot(source_paths),
+    )
+    atomic_write_text(target_codex_home / "config.toml", sanitized_config, mode=0o600)
+    atomic_write_json(target_codex_home / "auth.json", {}, mode=0o600)
+
+
+def build_official_profile_via_codex_login(paths: Paths, name: str, note: str = "") -> dict[str, Any]:
+    if not shutil.which("codex"):
+        raise RelayError("Could not find `codex` in PATH.")
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise RelayError("Official login requires an interactive terminal.")
+
+    runtime_root = paths.codex_home / "relay_login_runtime"
+    ensure_dir(runtime_root)
+    with tempfile.TemporaryDirectory(prefix="official-login-", dir=runtime_root) as temp_root:
+        temp_codex_home = Path(temp_root) / ".codex"
+        prepare_official_login_home(paths, temp_codex_home)
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(temp_codex_home)
+        completed = subprocess.run(
+            ["codex", "login", "--device-auth"],
+            env=env,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RelayError("Official login was cancelled or failed.")
+
+        status_check = subprocess.run(
+            ["codex", "login", "status"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_check.returncode != 0:
+            detail = status_check.stdout.strip() or status_check.stderr.strip() or "unknown login status"
+            raise RelayError(f"Official login did not complete cleanly: {excerpt(detail)}")
+
+        temp_paths = build_paths(temp_codex_home)
+        live_state = read_live_state(temp_paths)
+        if live_state.get("type") != "official":
+            raise RelayError(
+                "Codex login finished, but no official subscription tokens were detected."
+            )
+        profile = build_profile_from_state(name, live_state, note)
+        profile["login_method"] = "device_auth"
+        return profile
 
 
 def build_responses_url(base_url: str, suffix: str) -> str:
@@ -501,6 +1067,15 @@ def responses_url_candidates(base_url: str) -> list[str]:
 def excerpt(value: str, limit: int = 120) -> str:
     compact = " ".join(value.split())
     return compact if len(compact) <= limit else compact[: limit - 3] + "..."
+
+
+def clamp_text(value: str | None, limit: int = PROBE_TEXT_STORAGE_LIMIT) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def build_probe_prompt(message: str) -> str:
@@ -691,8 +1266,8 @@ def probe_via_http(
                             "ok": ok,
                             "method": "http",
                             "status_code": getattr(response, "status", None),
-                            "detail": excerpt(detail),
-                            "reply": excerpt(content, DEFAULT_REPLY_DISPLAY_LIMIT) if content else None,
+                            "detail": clamp_text(detail),
+                            "reply": clamp_text(content),
                             "latency_ms": latency_ms,
                         }
                 except urllib.error.HTTPError as exc:
@@ -708,7 +1283,7 @@ def probe_via_http(
                         "ok": False,
                         "method": "http",
                         "status_code": exc.code,
-                        "detail": excerpt(detail),
+                        "detail": clamp_text(detail),
                         "reply": None,
                         "latency_ms": latency_ms,
                     }
@@ -727,7 +1302,7 @@ def probe_via_http(
                         "ok": False,
                         "method": "http",
                         "status_code": None,
-                        "detail": excerpt(reason_text),
+                        "detail": clamp_text(reason_text),
                         "reply": None,
                         "latency_ms": latency_ms,
                     }
@@ -777,7 +1352,13 @@ def probe_via_codex(
         ensure_dir(temp_tmpdir)
         env = os.environ.copy()
         env["CODEX_HOME"] = str(temp_codex_home)
-        env["OPENAI_API_KEY"] = profile["api_key"]
+        if profile_type(profile) == "relay":
+            api_key = profile_api_key(profile)
+            if not api_key:
+                raise RelayError(f"Relay profile '{profile.get('name')}' is missing api_key.")
+            env["OPENAI_API_KEY"] = api_key
+        else:
+            env.pop("OPENAI_API_KEY", None)
         env["TMPDIR"] = str(temp_tmpdir)
         env["NO_COLOR"] = "1"
         cmd = [
@@ -832,8 +1413,8 @@ def probe_via_codex(
             "ok": ok,
             "method": "codex",
             "status_code": completed.returncode,
-            "detail": excerpt(detail or f"codex exited with {completed.returncode}"),
-            "reply": excerpt(reply, DEFAULT_REPLY_DISPLAY_LIMIT) if reply else None,
+            "detail": clamp_text(detail or f"codex exited with {completed.returncode}"),
+            "reply": clamp_text(reply),
             "latency_ms": latency_ms,
         }
 
@@ -872,6 +1453,15 @@ def probe_one(
     expect: str | None,
 ) -> dict[str, Any]:
     if method == "http":
+        if not profile_supports_http(profile):
+            return {
+                "ok": False,
+                "method": "http",
+                "status_code": None,
+                "detail": "HTTP probe is only available for relay profiles with base_url + api_key",
+                "reply": None,
+                "latency_ms": None,
+            }
         return probe_via_http(profile, model, message, timeout, expect)
     return probe_via_codex(source_paths, profile, model, message, timeout, expect)
 
@@ -912,6 +1502,13 @@ def resolve_probe_methods(via: str) -> list[str]:
     return [via]
 
 
+def effective_probe_methods(profile: dict[str, Any], requested_methods: list[str]) -> list[str]:
+    methods = list(requested_methods)
+    if "http" in methods and not profile_supports_http(profile):
+        methods = [method for method in methods if method != "http"]
+    return methods or list(requested_methods)
+
+
 def primary_probe_method(methods: list[str]) -> str:
     if "codex" in methods:
         return "codex"
@@ -937,7 +1534,8 @@ def print_probe_results(
     for profile, results_by_method, methods in results:
         status, _ = summarize_probe_status(results_by_method, methods)
         print(f"[{status}] {profile['name']}")
-        print(f"    URL         : {profile['base_url']}")
+        print(f"    Type        : {profile_display_type(profile)}")
+        print(f"    Target      : {profile_display_target(profile)}")
         for method in methods:
             result = results_by_method.get(method)
             label = method.capitalize()
@@ -952,10 +1550,10 @@ def print_probe_results(
             print(f"    {label:<11}: {sub_status} | {code_text} | {time_text}")
             reply = result.get("reply")
             if reply:
-                print(f"    {label} Reply : {reply}")
+                print(f"    {label} Reply : {excerpt(reply, DEFAULT_REPLY_DISPLAY_LIMIT)}")
             detail = result.get("detail")
             if detail and (not result.get("ok")) and detail != reply:
-                print(f"    {label} Detail: {detail}")
+                print(f"    {label} Detail: {excerpt(detail, DEFAULT_REPLY_DISPLAY_LIMIT)}")
 
 
 def execute_probe(
@@ -970,17 +1568,17 @@ def execute_probe(
 ) -> tuple[list[tuple[dict[str, Any], dict[str, dict[str, Any]], list[str]]], bool]:
     live_state = read_live_state(paths)
     resolved_model = model or live_state.get("model") or "gpt-5.4"
-    methods = resolve_probe_methods(via)
+    requested_methods = resolve_probe_methods(via)
 
     if timeout is None:
         timeout = max(
             DEFAULT_HTTP_TIMEOUT if method == "http" else DEFAULT_CODEX_TIMEOUT
-            for method in methods
+            for method in requested_methods
         )
     if workers is None:
         workers = sum(
             DEFAULT_HTTP_WORKERS if method == "http" else DEFAULT_CODEX_WORKERS
-            for method in methods
+            for method in requested_methods
         )
 
     result_slots: dict[int, dict[str, Any]] = {}
@@ -989,7 +1587,8 @@ def execute_probe(
             concurrent.futures.Future[dict[str, Any]], tuple[int, dict[str, Any], str]
         ] = {}
         for index, profile in targets:
-            result_slots[index] = {"profile": profile, "methods": {}}
+            methods = effective_probe_methods(profile, requested_methods)
+            result_slots[index] = {"profile": profile, "methods": {}, "requested_methods": methods}
             for method in methods:
                 profile_copy = copy.deepcopy(profile)
                 future = executor.submit(
@@ -1006,7 +1605,17 @@ def execute_probe(
 
         for future in concurrent.futures.as_completed(futures):
             index, profile, method = futures[future]
-            result = future.result()
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "method": method,
+                    "status_code": None,
+                    "detail": clamp_text(f"{type(exc).__name__}: {exc}") or "unexpected probe error",
+                    "reply": None,
+                    "latency_ms": None,
+                }
             slot = result_slots.setdefault(index, {"profile": profile, "methods": {}})
             slot["methods"][method] = result
 
@@ -1015,6 +1624,7 @@ def execute_probe(
     for index in sorted(result_slots):
         slot = result_slots[index]
         methods_result = slot["methods"]
+        methods = slot.get("requested_methods") or ["codex"]
         _, profile_ok = summarize_probe_status(methods_result, methods)
         overall_ok = overall_ok and profile_ok
         ordered_results.append((slot["profile"], methods_result, methods))
@@ -1081,24 +1691,91 @@ def cmd_add(args: argparse.Namespace) -> int:
 def cmd_save_current(args: argparse.Namespace) -> int:
     paths = build_paths(args.codex_home)
     live_state = read_live_state(paths)
-    if not live_state["base_url"] or not live_state["api_key"]:
-        raise RelayError("The current Codex config does not have both base_url and OPENAI_API_KEY.")
+    if live_state.get("type") not in {"relay", "official"}:
+        raise RelayError(
+            "The current Codex config is neither a relay profile nor an official subscription."
+        )
     with store_lock(paths):
         store, creation_message = load_store_unlocked(paths)
         if creation_message:
             print(creation_message)
         if profile_exists(store, args.name):
             raise RelayError(f"Profile already exists: {args.name}")
-        profile = make_profile(
+        profile = build_profile_from_state(
             args.name,
-            live_state["base_url"],
-            live_state["api_key"],
+            live_state,
             args.note or "",
+            source_path=str(paths.codex_home),
         )
         profile["last_used_at"] = now_iso()
         store["profiles"].append(profile)
         write_store(paths, store)
-    print(f"Saved the current live config as profile '{args.name}'.")
+    print(
+        f"Saved the current {profile_type(profile)} live config as profile '{args.name}'."
+    )
+    return 0
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    paths = build_paths(args.codex_home)
+    source_dir = Path(args.source).expanduser().resolve()
+    with store_lock(paths):
+        store, creation_message = load_store_unlocked(paths)
+        if creation_message:
+            print(creation_message)
+        name = args.name
+        if not name:
+            imported_state = read_live_state(build_paths(source_dir))
+            if imported_state.get("type") == "relay" and isinstance(imported_state.get("base_url"), str):
+                name = suggest_name(store, imported_state["base_url"])
+            else:
+                name = suggest_official_name(store, imported_state.get("official_id"), source_dir)
+        profile = import_profile_from_directory(store, name, source_dir, args.note or "")
+        store["profiles"].append(profile)
+        write_store(paths, store)
+    print(
+        f"Imported {profile_type(profile)} profile '{profile['name']}' from {source_dir}."
+    )
+    if args.activate:
+        apply_profile(paths, profile)
+        with store_lock(paths):
+            store, _ = load_store_unlocked(paths)
+            index = find_profile_index(store, profile["name"])
+            store["profiles"][index]["last_used_at"] = now_iso()
+            store["profiles"][index]["updated_at"] = now_iso()
+            write_store(paths, store)
+        print(f"Activated profile '{profile['name']}'.")
+    return 0
+
+
+def cmd_login_official(args: argparse.Namespace) -> int:
+    paths = build_paths(args.codex_home)
+    with store_lock(paths):
+        store, creation_message = load_store_unlocked(paths)
+        if creation_message:
+            print(creation_message)
+        if profile_exists(store, args.name):
+            raise RelayError(f"Profile already exists: {args.name}")
+
+    profile = build_official_profile_via_codex_login(paths, args.name, args.note or "")
+
+    with store_lock(paths):
+        store, _ = load_store_unlocked(paths)
+        if profile_exists(store, args.name):
+            raise RelayError(f"Profile already exists: {args.name}")
+        store["profiles"].append(profile)
+        write_store(paths, store)
+
+    print(f"Saved official profile '{args.name}' from native `codex login`.")
+    if args.activate:
+        apply_profile(paths, profile)
+        with store_lock(paths):
+            store, _ = load_store_unlocked(paths)
+            index = find_profile_index(store, profile["name"])
+            store["profiles"][index]["last_used_at"] = now_iso()
+            store["profiles"][index]["updated_at"] = now_iso()
+            write_store(paths, store)
+        print(f"Activated profile '{profile['name']}'.")
     return 0
 
 
@@ -1119,8 +1796,9 @@ def cmd_use(args: argparse.Namespace) -> int:
         write_store(paths, store)
     apply_profile(paths, profile)
     print(f"Activated profile '{profile['name']}'.")
-    print(f"Base URL -> {profile['base_url']}")
-    print(f"API key  -> {mask_key(profile['api_key'])}")
+    print(f"Type     -> {profile_display_type(profile)}")
+    print(f"Target   -> {profile_display_target(profile)}")
+    print(f"Auth     -> {profile_display_secret(profile)}")
     print(f"Backup   -> {paths.backup_dir / 'config.toml.last.bak'}")
     return 0
 
@@ -1163,21 +1841,25 @@ def cmd_edit(args: argparse.Namespace) -> int:
             interactive_label="Select a profile to edit",
         )
         old_signature = profile_signature(profile)
+        kind = profile_type(profile)
 
         if args.rename:
             if args.rename != profile["name"] and profile_exists(store, args.rename):
                 raise RelayError(f"Profile already exists: {args.rename}")
             profile["name"] = args.rename
-        if args.url:
-            profile["base_url"] = normalize_url(args.url)
-        if args.key:
-            profile["api_key"] = args.key.strip()
+        if kind == "relay":
+            if args.url:
+                profile["base_url"] = normalize_url(args.url)
+            if args.key:
+                profile["api_key"] = args.key.strip()
+        elif args.url or args.key:
+            raise RelayError("Official profiles only support renaming and note updates.")
         if args.note is not None:
             profile["note"] = args.note.strip()
         profile["updated_at"] = now_iso()
 
         apply_live = old_signature == live_signature(live_state) and (
-            args.url is not None or args.key is not None
+            kind == "relay" and (args.url is not None or args.key is not None)
         )
         write_store(paths, store)
 
@@ -1238,12 +1920,14 @@ class RelayTUI:
         self.paths = paths
         self.selected = 0
         self.status = "Ready"
-        self.store: dict[str, Any] = {"version": 1, "profiles": []}
+        self.store: dict[str, Any] = {"version": STORE_VERSION, "profiles": []}
         self.live_state: dict[str, Any] = {}
         self.probe_via = "both"
         self.probe_message = DEFAULT_MESSAGE
         self.probe_expect = ""
         self.filter_text = ""
+        self.type_filter = "all"
+        self.marked_profiles: set[str] = set()
         self.should_exit = False
         self.colors_ready = False
         self.color_map: dict[str, int] = {}
@@ -1251,6 +1935,12 @@ class RelayTUI:
     def refresh(self) -> None:
         self.store, _ = load_store(self.paths)
         self.live_state = read_live_state(self.paths)
+        valid_names = {
+            profile.get("name")
+            for profile in self.store.get("profiles", [])
+            if isinstance(profile, dict) and isinstance(profile.get("name"), str)
+        }
+        self.marked_profiles.intersection_update(valid_names)
         profiles = self.visible_profiles()
         if not profiles:
             self.selected = 0
@@ -1261,19 +1951,21 @@ class RelayTUI:
 
     def visible_profiles(self) -> list[tuple[int, dict[str, Any]]]:
         profiles = self.store.get("profiles", [])
-        if not self.filter_text:
-            return list(enumerate(profiles))
         needle = self.filter_text.casefold()
         visible: list[tuple[int, dict[str, Any]]] = []
         for index, profile in enumerate(profiles):
+            if self.type_filter != "all" and profile_type(profile) != self.type_filter:
+                continue
             haystack = " ".join(
                 [
                     str(profile.get("name") or ""),
-                    str(profile.get("base_url") or ""),
+                    str(profile_display_target(profile)),
                     str(profile.get("note") or ""),
+                    str(profile_type(profile)),
+                    str(profile.get("source_path") or ""),
                 ]
             ).casefold()
-            if needle in haystack:
+            if not needle or needle in haystack:
                 visible.append((index, profile))
         return visible
 
@@ -1290,6 +1982,49 @@ class RelayTUI:
     def current_profile(self) -> dict[str, Any] | None:
         entry = self.current_profile_entry()
         return entry[1] if entry else None
+
+    def marked_target_entries(self) -> list[tuple[int, dict[str, Any]]]:
+        if not self.marked_profiles:
+            return []
+        return [
+            (index, profile)
+            for index, profile in enumerate(self.store.get("profiles", []))
+            if profile.get("name") in self.marked_profiles
+        ]
+
+    def toggle_mark_current(self) -> None:
+        entry = self.current_profile_entry()
+        if not entry:
+            self.status = "No profile selected."
+            return
+        name = entry[1]["name"]
+        if name in self.marked_profiles:
+            self.marked_profiles.remove(name)
+            self.status = f"Unmarked '{name}'."
+        else:
+            self.marked_profiles.add(name)
+            self.status = f"Marked '{name}' for probe."
+
+    def toggle_mark_visible(self) -> None:
+        profiles = self.visible_profiles()
+        if not profiles:
+            self.status = "No visible profiles to mark."
+            return
+        visible_names = {profile["name"] for _, profile in profiles}
+        if visible_names.issubset(self.marked_profiles):
+            self.marked_profiles.difference_update(visible_names)
+            self.status = f"Unmarked {len(visible_names)} visible profile(s)."
+        else:
+            self.marked_profiles.update(visible_names)
+            self.status = f"Marked {len(visible_names)} visible profile(s)."
+
+    def clear_marked(self) -> None:
+        count = len(self.marked_profiles)
+        if count == 0:
+            self.status = "No marked profiles."
+            return
+        self.marked_profiles.clear()
+        self.status = f"Cleared {count} marked profile(s)."
 
     def active_store_index(self) -> int | None:
         active = live_signature(self.live_state)
@@ -1381,29 +2116,57 @@ class RelayTUI:
     def info_dialog(self, stdscr: Any, title: str, body: str) -> None:
         import curses
 
-        lines: list[str] = []
-        max_width = max(20, min(stdscr.getmaxyx()[1] - 8, 90))
+        max_width = max(20, min(stdscr.getmaxyx()[1] - 8, 120))
+        wrapped_lines: list[str] = []
         for block in body.splitlines() or [""]:
-            lines.extend(self.wrap_lines(block, max_width - 4))
-        lines = lines[: max(3, stdscr.getmaxyx()[0] - 8)]
+            wrapped_lines.extend(self.wrap_lines(block, max_width - 4))
+        if not wrapped_lines:
+            wrapped_lines = [""]
 
-        height = min(stdscr.getmaxyx()[0] - 4, max(7, len(lines) + 4))
-        width = min(stdscr.getmaxyx()[1] - 4, max(30, max((len(line) for line in lines), default=10) + 4))
+        height = min(stdscr.getmaxyx()[0] - 4, max(8, min(len(wrapped_lines) + 4, stdscr.getmaxyx()[0] - 4)))
+        width = min(
+            stdscr.getmaxyx()[1] - 4,
+            max(30, min(max((len(line) for line in wrapped_lines), default=10) + 4, max_width)),
+        )
         top = max(1, (stdscr.getmaxyx()[0] - height) // 2)
         left = max(1, (stdscr.getmaxyx()[1] - width) // 2)
         win = curses.newwin(height, width, top, left)
         win.keypad(True)
+        offset = 0
+        page_size = max(1, height - 3)
         while True:
             win.erase()
             win.box()
             self.safe_add(win, 0, 2, f" {title} ", self.color(curses, "header", curses.A_BOLD))
-            for idx, line in enumerate(lines[: height - 3]):
+            visible_lines = wrapped_lines[offset : offset + page_size]
+            for idx, line in enumerate(visible_lines):
                 self.safe_add(win, idx + 1, 2, line)
-            self.safe_add(win, height - 2, 2, "Press any key to close", self.color(curses, "accent"))
+            footer = "Up/Down scroll | PgUp/PgDn page | Home/End | q/Esc close"
+            if len(wrapped_lines) > page_size:
+                footer = f"{offset + 1}-{min(offset + page_size, len(wrapped_lines))}/{len(wrapped_lines)} | {footer}"
+            self.safe_add(win, height - 2, 2, excerpt(footer, width - 4), self.color(curses, "accent"))
             win.refresh()
             key = win.get_wch()
-            if key is not None:
+            if key in ("q", "Q", "\x1b", "\n", "\r", " "):
                 return
+            if key in (curses.KEY_UP, "k"):
+                offset = max(0, offset - 1)
+                continue
+            if key in (curses.KEY_DOWN, "j"):
+                offset = min(max(0, len(wrapped_lines) - page_size), offset + 1)
+                continue
+            if key == curses.KEY_PPAGE:
+                offset = max(0, offset - page_size)
+                continue
+            if key == curses.KEY_NPAGE:
+                offset = min(max(0, len(wrapped_lines) - page_size), offset + page_size)
+                continue
+            if key == curses.KEY_HOME:
+                offset = 0
+                continue
+            if key == curses.KEY_END:
+                offset = max(0, len(wrapped_lines) - page_size)
+                continue
 
     def confirm_dialog(self, stdscr: Any, title: str, body: str) -> bool:
         import curses
@@ -1567,6 +2330,146 @@ class RelayTUI:
                 self.selected = idx
                 break
 
+    def run_with_terminal_handoff(
+        self,
+        stdscr: Any,
+        title: str,
+        message_lines: list[str],
+        runner: Any,
+    ) -> Any:
+        import curses
+
+        self.status = title
+        self.draw(stdscr)
+        stdscr.refresh()
+        curses.def_prog_mode()
+        curses.endwin()
+        printed_notice = False
+        try:
+            notice = "\n".join(line for line in message_lines if line)
+            if notice:
+                print(notice)
+                print("")
+                printed_notice = True
+            return runner()
+        finally:
+            if printed_notice:
+                try:
+                    print("")
+                    input("Press Enter to return to codex-relay...")
+                except EOFError:
+                    pass
+            curses.reset_prog_mode()
+            try:
+                curses.curs_set(0)
+            except Exception:
+                pass
+            stdscr.erase()
+            stdscr.refresh()
+
+    def action_login_official(self, stdscr: Any) -> None:
+        name = self.input_dialog(
+            stdscr,
+            "Official Login",
+            "Profile name for the new official subscription:",
+            allow_empty=False,
+        )
+        if name is None:
+            self.status = "Official login cancelled."
+            return
+        note = self.input_dialog(stdscr, "Official Login", "Note:", allow_empty=True) or ""
+        activate = self.confirm_dialog(
+            stdscr,
+            "Activate Now?",
+            "Activate this official profile right after login succeeds?",
+        )
+        with store_lock(self.paths):
+            store, _ = load_store_unlocked(self.paths)
+            if profile_exists(store, name):
+                raise RelayError(f"Profile already exists: {name}")
+        profile = self.run_with_terminal_handoff(
+            stdscr,
+            "Launching native `codex login --device-auth` in an isolated profile...",
+            [
+                "Native Codex login is taking over this terminal temporarily.",
+                "If the browser opens `auth.openai.com/log-in` first, that is expected.",
+                "Sign in there first, then continue the Codex device authorization flow.",
+                "Complete the official device login in your browser.",
+                "This runs in an isolated CODEX_HOME and will only be saved if validation succeeds.",
+            ],
+            lambda: build_official_profile_via_codex_login(self.paths, name, note),
+        )
+        with store_lock(self.paths):
+            store, _ = load_store_unlocked(self.paths)
+            if profile_exists(store, name):
+                raise RelayError(f"Profile already exists: {name}")
+            store["profiles"].append(profile)
+            write_store(self.paths, store)
+        if activate:
+            apply_profile(self.paths, profile)
+            with store_lock(self.paths):
+                store, _ = load_store_unlocked(self.paths)
+                index = find_profile_index(store, profile["name"])
+                store["profiles"][index]["last_used_at"] = now_iso()
+                store["profiles"][index]["updated_at"] = now_iso()
+                write_store(self.paths, store)
+            self.status = f"Logged in and activated '{profile['name']}'."
+        else:
+            self.status = f"Logged in and saved official profile '{profile['name']}'."
+        self.refresh()
+        for idx, item in enumerate(self.store.get("profiles", [])):
+            if item.get("name") == profile["name"]:
+                self.selected = idx
+                break
+
+    def action_import(self, stdscr: Any) -> None:
+        source = self.input_dialog(
+            stdscr,
+            "Import Profile",
+            "Directory containing config.toml and auth.json:",
+            allow_empty=False,
+        )
+        if source is None:
+            self.status = "Import cancelled."
+            return
+        name = self.input_dialog(
+            stdscr,
+            "Import Profile",
+            "Profile name (leave empty to auto-suggest):",
+            allow_empty=True,
+        )
+        if name is None:
+            self.status = "Import cancelled."
+            return
+        note = self.input_dialog(stdscr, "Import Profile", "Note:", allow_empty=True) or ""
+        activate = self.confirm_dialog(stdscr, "Activate Now?", "Activate this imported profile now?")
+        source_root = Path(source).expanduser().resolve()
+        with store_lock(self.paths):
+            store, _ = load_store_unlocked(self.paths)
+            target_name = name.strip()
+            if not target_name:
+                imported_state = read_live_state(build_paths(source_root))
+                target_name = suggest_name_from_state(store, imported_state, source_root)
+            profile = import_profile_from_directory(store, target_name, source_root, note)
+            store["profiles"].append(profile)
+            write_store(self.paths, store)
+        if activate:
+            apply_profile(self.paths, profile)
+            with store_lock(self.paths):
+                store, _ = load_store_unlocked(self.paths)
+                index = find_profile_index(store, profile["name"])
+                store["profiles"][index]["last_used_at"] = now_iso()
+                store["profiles"][index]["updated_at"] = now_iso()
+                write_store(self.paths, store)
+            self.status = f"Imported and activated '{profile['name']}'."
+        else:
+            self.status = f"Imported {profile_type(profile)} profile '{profile['name']}'."
+        self.refresh()
+        for idx, item in enumerate(self.store.get("profiles", [])):
+            if item.get("name") == profile["name"]:
+                self.selected = idx
+                break
+
     def action_edit(self, stdscr: Any) -> None:
         profile = self.current_profile()
         if not profile:
@@ -1577,14 +2480,31 @@ class RelayTUI:
         if name is None:
             self.status = "Edit cancelled."
             return
-        url = self.input_dialog(stdscr, "Edit Profile", "Relay base URL:", profile["base_url"], allow_empty=False)
-        if url is None:
-            self.status = "Edit cancelled."
-            return
-        key = self.input_dialog(stdscr, "Edit Profile", "API key:", profile["api_key"], allow_empty=False, secret=True)
-        if key is None:
-            self.status = "Edit cancelled."
-            return
+        kind = profile_type(profile)
+        url = None
+        key = None
+        if kind == "relay":
+            url = self.input_dialog(
+                stdscr,
+                "Edit Profile",
+                "Relay base URL:",
+                profile.get("base_url", ""),
+                allow_empty=False,
+            )
+            if url is None:
+                self.status = "Edit cancelled."
+                return
+            key = self.input_dialog(
+                stdscr,
+                "Edit Profile",
+                "API key:",
+                profile.get("api_key", ""),
+                allow_empty=False,
+                secret=True,
+            )
+            if key is None:
+                self.status = "Edit cancelled."
+                return
         note = self.input_dialog(stdscr, "Edit Profile", "Note:", profile.get("note", ""), allow_empty=True)
         live_state = read_live_state(self.paths)
         apply_live = False
@@ -1597,13 +2517,19 @@ class RelayTUI:
             if name != original_name and profile_exists(store, name):
                 raise RelayError(f"Profile already exists: {name}")
             target["name"] = name
-            target["base_url"] = normalize_url(url)
-            target["api_key"] = key.strip()
+            if kind == "relay":
+                target["base_url"] = normalize_url(url or "")
+                target["api_key"] = (key or "").strip()
             target["note"] = (note or "").strip()
             target["updated_at"] = now_iso()
             updated_profile = dict(target)
-            apply_live = old_signature == live_signature(live_state) and (
-                target["base_url"] != profile["base_url"] or target["api_key"] != profile["api_key"]
+            apply_live = (
+                kind == "relay"
+                and old_signature == live_signature(live_state)
+                and (
+                    target.get("base_url") != profile.get("base_url")
+                    or target.get("api_key") != profile.get("api_key")
+                )
             )
             write_store(self.paths, store)
         if apply_live and updated_profile is not None:
@@ -1646,8 +2572,10 @@ class RelayTUI:
 
     def action_save_current(self, stdscr: Any) -> None:
         live_state = read_live_state(self.paths)
-        if not live_state.get("base_url") or not live_state.get("api_key"):
-            raise RelayError("Current live config does not contain both base_url and OPENAI_API_KEY.")
+        if live_state.get("type") not in {"relay", "official"}:
+            raise RelayError(
+                "Current live config is neither a relay profile nor an official subscription."
+            )
         name = self.input_dialog(stdscr, "Save Current", "Profile name for current live config:", allow_empty=False)
         if name is None:
             self.status = "Save-current cancelled."
@@ -1657,7 +2585,7 @@ class RelayTUI:
             store, _ = load_store_unlocked(self.paths)
             if profile_exists(store, name):
                 raise RelayError(f"Profile already exists: {name}")
-            profile = make_profile(name, live_state["base_url"], live_state["api_key"], note)
+            profile = build_profile_from_state(name, live_state, note, source_path=str(self.paths.codex_home))
             profile["last_used_at"] = now_iso()
             store["profiles"].append(profile)
             write_store(self.paths, store)
@@ -1666,7 +2594,7 @@ class RelayTUI:
             if item.get("name") == name:
                 self.selected = idx
                 break
-        self.status = f"Saved current live config as '{name}'."
+        self.status = f"Saved current {profile_type(profile)} config as '{name}'."
 
     def action_probe(self, stdscr: Any, all_profiles: bool) -> None:
         profiles = self.visible_profiles()
@@ -1677,12 +2605,17 @@ class RelayTUI:
             targets = profiles
             label = "all visible profiles" if self.filter_text else "all profiles"
         else:
-            current = self.current_profile_entry()
-            if not current:
-                self.status = "No profile selected."
-                return
-            targets = [current]
-            label = current[1]["name"]
+            marked = self.marked_target_entries()
+            if marked:
+                targets = marked
+                label = f"{len(marked)} marked profile(s)"
+            else:
+                current = self.current_profile_entry()
+                if not current:
+                    self.status = "No profile selected."
+                    return
+                targets = [current]
+                label = current[1]["name"]
         self.status = f"Probing {label} via {self.probe_via}..."
         self.draw(stdscr)
         stdscr.refresh()
@@ -1707,9 +2640,9 @@ class RelayTUI:
                 latency = result.get("latency_ms")
                 reply = result.get("reply") or "-"
                 lines.append(f"  {method}: {'ok' if result['ok'] else 'fail'} | code={code if code is not None else '-'} | time={latency}ms")
-                lines.extend(f"    {line}" for line in self.wrap_lines(f"reply: {reply}", 70))
+                lines.extend(f"    {line}" for line in self.wrap_lines(f"reply: {reply}", 100))
                 if not result["ok"] and result.get("detail"):
-                    lines.extend(f"    {line}" for line in self.wrap_lines(f"detail: {result['detail']}", 70))
+                    lines.extend(f"    {line}" for line in self.wrap_lines(f"detail: {result['detail']}", 100))
             lines.append("")
         self.info_dialog(stdscr, f"Probe Results - {status_label}", "\n".join(lines).strip())
         self.status = f"Probe finished for {label}."
@@ -1761,6 +2694,19 @@ class RelayTUI:
         else:
             self.status = "Filter cleared."
 
+    def cycle_type_filter(self) -> None:
+        order = ["all", "relay", "official"]
+        self.type_filter = order[(order.index(self.type_filter) + 1) % len(order)]
+        self.refresh()
+        self.status = f"Type filter set to {self.type_filter}."
+
+    def set_type_filter(self, value: str) -> None:
+        if value not in {"all", "relay", "official"}:
+            return
+        self.type_filter = value
+        self.refresh()
+        self.status = f"Type filter set to {self.type_filter}."
+
     def clear_search(self) -> None:
         self.filter_text = ""
         self.refresh()
@@ -1773,13 +2719,16 @@ class RelayTUI:
             return
         lines = [
             f"Name: {profile.get('name')}",
-            f"URL: {profile.get('base_url')}",
-            f"Key: {mask_key(profile.get('api_key'))}",
+            f"Type: {profile_type(profile)}",
+            f"Target: {profile_display_target(profile)}",
+            f"Auth: {profile_display_secret(profile)}",
             f"Note: {profile.get('note') or '-'}",
             f"Created: {profile.get('created_at') or '-'}",
             f"Updated: {profile.get('updated_at') or '-'}",
             f"Last used: {profile.get('last_used_at') or '-'}",
         ]
+        if profile_type(profile) == "official" and profile.get("source_path"):
+            lines.append(f"Source: {profile.get('source_path')}")
         last_probe = profile.get("last_probe")
         methods = last_probe.get("methods") if isinstance(last_probe, dict) else None
         if isinstance(methods, dict):
@@ -1813,17 +2762,25 @@ class RelayTUI:
                 "PgUp/PgDn      : jump faster through the list",
                 "Home/End       : jump to the first/last visible profile",
                 "Enter or u     : activate selected profile",
-                "a              : add profile",
+                "a              : add relay profile",
+                "o              : add official profile via native codex login",
+                "I              : import a profile snapshot from a directory",
                 "e              : edit selected profile",
                 "d              : delete selected profile",
                 "s              : save current live config as profile",
-                "p              : probe selected profile",
+                "Space          : mark/unmark selected profile for probe",
+                "A              : mark or unmark all visible profiles",
+                "C              : clear all probe marks",
+                "p              : probe marked profiles, or current if none marked",
                 "P              : probe all profiles",
                 "v              : cycle probe mode (both/http/codex)",
+                "t              : cycle type filter (all/relay/official)",
+                "Tab/Shift-Tab   : switch the top type tab",
+                "1/2/3          : jump to All/Relay/Official tab",
                 "m              : edit probe message",
                 "x              : edit expected substring",
                 "/              : search/filter profiles",
-                "c              : clear filter",
+                "c              : clear filter text",
                 "i              : open full details for selected profile",
                 "g              : jump to active profile",
                 "r              : refresh",
@@ -1849,7 +2806,7 @@ class RelayTUI:
 
         left_width = max(30, min(42, width // 3))
         right_x = left_width + 2
-        content_top = 4
+        content_top = 5
         footer_top = height - 3
         content_height = max(1, footer_top - content_top - 1)
         active_sig = live_signature(self.live_state)
@@ -1872,6 +2829,8 @@ class RelayTUI:
         header_summary = f"{len(profiles)}/{total_profiles} visible"
         if self.filter_text:
             header_summary += " | filtered"
+        if self.type_filter != "all":
+            header_summary += f" | type={self.type_filter}"
         self.safe_add(
             stdscr,
             0,
@@ -1891,20 +2850,31 @@ class RelayTUI:
             probe_cfg += f" | expect={self.probe_expect}"
         self.safe_add(stdscr, 2, 0, excerpt(probe_cfg, width - 1), accent_attr)
 
-        stdscr.hline(3, 0, curses.ACS_HLINE, max(1, width - 1))
+        tabs = [("all", "All"), ("relay", "Relay"), ("official", "Official")]
+        tab_x = 0
+        for value, label in tabs:
+            is_active_tab = self.type_filter == value
+            tab_text = f" {label} "
+            tab_attr = selected_attr | curses.A_BOLD if is_active_tab else section_attr
+            self.safe_add(stdscr, 3, tab_x, tab_text, tab_attr)
+            tab_x += len(tab_text) + 1
+        tabs_hint = "Tab/Shift-Tab or 1/2/3"
+        self.safe_add(stdscr, 3, max(tab_x + 1, width - len(tabs_hint) - 1), tabs_hint, muted_attr)
+
+        stdscr.hline(4, 0, curses.ACS_HLINE, max(1, width - 1))
         stdscr.hline(height - 4, 0, curses.ACS_HLINE, max(1, width - 1))
-        stdscr.vline(content_top, left_width, curses.ACS_VLINE, max(1, height - 8))
+        stdscr.vline(content_top, left_width, curses.ACS_VLINE, max(1, height - 9))
 
         profiles_title = f"Profiles ({len(profiles)})"
         if self.filter_text:
             profiles_title += f" | / {excerpt(self.filter_text, max(10, left_width - 18))}"
-        self.safe_add(stdscr, 3, 0, excerpt(profiles_title, left_width - 1), section_attr)
+        self.safe_add(stdscr, 4, 0, excerpt(profiles_title, left_width - 1), section_attr)
 
         detail_header = "Details"
         current_entry = self.current_profile_entry()
         if current_entry:
             detail_header = f"Details | {current_entry[1].get('name')}"
-        self.safe_add(stdscr, 3, right_x, excerpt(detail_header, width - right_x - 1), section_attr)
+        self.safe_add(stdscr, 4, right_x, excerpt(detail_header, width - right_x - 1), section_attr)
 
         list_top = content_top
         list_height = content_height
@@ -1929,8 +2899,15 @@ class RelayTUI:
             for offset, (store_index, profile) in enumerate(visible):
                 row = list_top + offset
                 marker = "*" if profile_signature(profile) == active_sig else " "
-                line = f"{marker} [{store_index + 1:>2}] {profile['name']}"
-                url_excerpt = urllib.parse.urlparse(profile.get("base_url") or "").netloc or profile.get("base_url") or "-"
+                marked = "+" if profile.get("name") in self.marked_profiles else " "
+                kind = profile_type(profile)[0].upper()
+                line = f"{marker}{marked} [{store_index + 1:>2}] [{kind}] {profile['name']}"
+                display_target = profile_display_target(profile)
+                url_excerpt = (
+                    urllib.parse.urlparse(display_target).netloc
+                    if isinstance(display_target, str) and display_target.startswith("http")
+                    else display_target
+                ) or "-"
                 remaining = max(8, left_width - len(line) - 4)
                 line = f"{line}  {excerpt(url_excerpt, remaining)}"
                 attr = 0
@@ -1945,17 +2922,22 @@ class RelayTUI:
         detail_width = width - right_x - 1
         if profile:
             is_active = profile_signature(profile) == active_sig
+            is_marked = profile.get("name") in self.marked_profiles
             detail_lines = [
                 f"Name   : {profile.get('name')}",
-                f"URL    : {profile.get('base_url')}",
-                f"Key    : {mask_key(profile.get('api_key'))}",
+                f"Type   : {profile_type(profile)}",
+                f"Target : {profile_display_target(profile)}",
+                f"Auth   : {profile_display_secret(profile)}",
                 f"Active : {'yes' if is_active else 'no'}",
+                f"Marked : {'yes' if is_marked else 'no'}",
                 f"Note   : {profile.get('note') or '-'}",
                 f"Created: {profile.get('created_at') or '-'}",
                 f"Updated: {profile.get('updated_at') or '-'}",
                 f"Used   : {profile.get('last_used_at') or 'never'}",
                 f"Probe  : {format_probe(profile.get('last_probe'))}",
             ]
+            if profile_type(profile) == "official" and profile.get("source_path"):
+                detail_lines.append(f"Source : {profile.get('source_path')}")
             last_probe = profile.get("last_probe")
             methods = last_probe.get("methods") if isinstance(last_probe, dict) else None
             if isinstance(methods, dict):
@@ -1975,18 +2957,26 @@ class RelayTUI:
                     reply = entry.get("reply")
                     if reply:
                         detail_lines.extend(
-                            self.wrap_lines(f"Reply : {reply}", max(20, detail_width))
+                            self.wrap_lines(
+                                f"Reply : {excerpt(reply, RIGHT_PANEL_TEXT_LIMIT)}",
+                                max(20, detail_width),
+                            )
                         )
                     detail = entry.get("detail")
                     if detail and detail != reply:
                         detail_lines.extend(
-                            self.wrap_lines(f"Detail: {detail}", max(20, detail_width))
+                            self.wrap_lines(
+                                f"Detail: {excerpt(detail, RIGHT_PANEL_TEXT_LIMIT)}",
+                                max(20, detail_width),
+                            )
                         )
             detail_lines.extend(
                 [
                     "",
                     f"Visible filter : {self.filter_text or '(none)'}",
-                    "Shortcuts      : Enter use | p probe | i full details",
+                    f"Type filter    : {self.type_filter}",
+                    f"Marked count   : {len(self.marked_profiles)}",
+                    "Shortcuts      : Space mark | p probe marked/current | P probe-all | i full details",
                 ]
             )
             row = detail_y
@@ -2008,8 +2998,8 @@ class RelayTUI:
                 muted_attr,
             )
 
-        footer_primary = "Enter use | a add | e edit | d delete | p probe | P probe-all | v mode | / search | i details"
-        footer_secondary = "s save-current | m message | x expect | c clear-filter | g active | r refresh | h help | q quit"
+        footer_primary = "Enter use | Space mark | A mark-all-visible | C clear-marks | p probe marked/current | P probe-all | v mode | t type"
+        footer_secondary = "a relay | o official-login | I import | e edit | d delete | s save-current | m message | x expect | g active | r refresh | h help | q quit"
         self.safe_add(stdscr, height - 3, 0, excerpt(footer_primary, width - 1), accent_attr)
         self.safe_add(stdscr, height - 2, 0, excerpt(footer_secondary, width - 1), muted_attr)
         status_attr = self.status_attr(curses) | curses.A_BOLD
@@ -2046,11 +3036,40 @@ class RelayTUI:
             if profiles:
                 self.selected = profiles[-1][0]
             return
+        if key == "\t":
+            self.cycle_type_filter()
+            return
+        if key == curses.KEY_BTAB:
+            order = ["all", "relay", "official"]
+            current_pos = order.index(self.type_filter)
+            self.set_type_filter(order[(current_pos - 1) % len(order)])
+            return
+        if key == "1":
+            self.set_type_filter("all")
+            return
+        if key == "2":
+            self.set_type_filter("relay")
+            return
+        if key == "3":
+            self.set_type_filter("official")
+            return
         if key in ("\n", "\r", curses.KEY_ENTER, "u"):
             self.action_use()
             return
+        if key == " ":
+            self.toggle_mark_current()
+            return
+        if key == "A":
+            self.toggle_mark_visible()
+            return
         if key == "a":
             self.action_add(stdscr)
+            return
+        if key in ("o", "O"):
+            self.action_login_official(stdscr)
+            return
+        if key == "I":
+            self.action_import(stdscr)
             return
         if key == "e":
             self.action_edit(stdscr)
@@ -2070,6 +3089,9 @@ class RelayTUI:
         if key == "v":
             self.cycle_via()
             return
+        if key == "t":
+            self.cycle_type_filter()
+            return
         if key == "m":
             self.action_message(stdscr)
             return
@@ -2080,7 +3102,10 @@ class RelayTUI:
             self.action_search(stdscr)
             return
         if key in ("c", "C"):
-            self.clear_search()
+            if key == "C":
+                self.clear_marked()
+            else:
+                self.clear_search()
             return
         if key in ("i", "I"):
             self.action_details(stdscr)
@@ -2134,17 +3159,19 @@ def cmd_tui(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-relay",
-        description="Manage multiple Codex relay endpoints from the command line.",
+        description="Manage multiple Codex relay and official subscription profiles from the command line.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(
             """\
             Examples:
               codex-relay list
-              codex-relay add relay-a --url https://relay.example.com --key <API_KEY> --note "public relay"
+              codex-relay add relay-a --url https://relay.example.com --key sk-example --note "primary relay"
+              codex-relay login-official official-main
+              codex-relay import ~/.codex-backup/example-codex --name official-backup
               codex-relay use relay-a
               codex-relay edit relay-a --note "faster today"
               codex-relay probe-all
-              codex-relay probe relay-a backup-relay --via codex
+              codex-relay probe relay-a relay-b --via codex
             """
         ),
     )
@@ -2161,13 +3188,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    list_parser = subparsers.add_parser("list", help="List saved relay profiles.")
+    list_parser = subparsers.add_parser("list", help="List saved relay and official profiles.")
     list_parser.set_defaults(func=cmd_list)
 
-    current_parser = subparsers.add_parser("current", help="Show the currently active live Codex endpoint.")
+    current_parser = subparsers.add_parser("current", help="Show the currently active live Codex profile.")
     current_parser.set_defaults(func=cmd_current)
 
-    tui_parser = subparsers.add_parser("tui", aliases=["ui"], help="Launch the interactive relay manager.")
+    tui_parser = subparsers.add_parser("tui", aliases=["ui"], help="Launch the interactive profile manager.")
     tui_parser.set_defaults(func=cmd_tui)
 
     add_parser = subparsers.add_parser("add", help="Add a new relay profile.")
@@ -2184,11 +3211,38 @@ def build_parser() -> argparse.ArgumentParser:
 
     save_current_parser = subparsers.add_parser(
         "save-current",
-        help="Save the current live Codex config as a named profile.",
+        help="Save the current live relay or official Codex config as a named profile.",
     )
     save_current_parser.add_argument("name", help="Profile name.")
     save_current_parser.add_argument("--note", default="", help="Optional note.")
     save_current_parser.set_defaults(func=cmd_save_current)
+
+    login_official_parser = subparsers.add_parser(
+        "login-official",
+        help="Create an official profile via native `codex login --device-auth` in an isolated directory.",
+    )
+    login_official_parser.add_argument("name", help="Profile name.")
+    login_official_parser.add_argument("--note", default="", help="Optional note.")
+    login_official_parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="Activate the official profile immediately after login succeeds.",
+    )
+    login_official_parser.set_defaults(func=cmd_login_official)
+
+    import_parser = subparsers.add_parser(
+        "import",
+        help="Import a relay or official profile snapshot from another Codex directory.",
+    )
+    import_parser.add_argument("source", help="Directory containing config.toml and auth.json.")
+    import_parser.add_argument("--name", help="Profile name. Defaults to an auto-generated name.")
+    import_parser.add_argument("--note", default="", help="Optional note.")
+    import_parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="Activate the imported profile immediately.",
+    )
+    import_parser.set_defaults(func=cmd_import)
 
     use_parser = subparsers.add_parser("use", help="Activate a saved profile.")
     use_parser.add_argument("target", nargs="?", help="Profile name.")
@@ -2204,8 +3258,8 @@ def build_parser() -> argparse.ArgumentParser:
     edit_parser.add_argument("target", nargs="?", help="Profile name.")
     edit_parser.add_argument("--index", type=int, help="Profile index from `list`.")
     edit_parser.add_argument("--rename", help="Rename the profile.")
-    edit_parser.add_argument("--url", help="Update the relay base URL.")
-    edit_parser.add_argument("--key", help="Update the API key.")
+    edit_parser.add_argument("--url", help="Update the relay base URL. Relay profiles only.")
+    edit_parser.add_argument("--key", help="Update the API key. Relay profiles only.")
     edit_parser.add_argument("--note", help="Replace the note. Pass an empty string to clear it.")
     edit_parser.set_defaults(func=cmd_edit)
 
